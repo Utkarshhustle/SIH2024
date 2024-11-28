@@ -1,73 +1,100 @@
 // This file will handle the preprocessing steps: speed calculation, outlier removal, and interpolation.
 
-import geopy.distance
-import numpy as np
 import xml.etree.ElementTree as ET
-from datetime import datetime
-from scipy.interpolate import interp1d
+from geopy.distance import geodesic
 
-def calculate_speed_and_interpolate(gpx_file, speed_threshold=150, interpolate=True):
+def remove_outliers(gpx_file, threshold_km=0.1):
     """
-    Calculate speed, remove outliers, and interpolate the GPS data if necessary.
-    Args:
-        gpx_file (str): Path to the input GPX file.
-        speed_threshold (float): Threshold to filter outliers based on speed.
-        interpolate (bool): Whether to interpolate missing GPS points.
-
-    Returns:
-        list: Filtered and interpolated GPS data points (lat, lon, timestamp).
+    Remove outliers by calculating the distance between consecutive points. If the distance
+    between points exceeds the threshold, it's considered an outlier.
     """
-    # Parse GPX file
     tree = ET.parse(gpx_file)
     root = tree.getroot()
 
-    latitudes = []
-    longitudes = []
-    timestamps = []
-    speeds = []
+    valid_trkpts = []
     prev_point = None
-    prev_time = None
 
-    # Collect data points and calculate speeds
     for trkpt in root.findall(".//trkpt"):
         lat = float(trkpt.attrib['lat'])
         lon = float(trkpt.attrib['lon'])
-        time_str = trkpt.find(".//time").text
-        time_obj = datetime.strptime(time_str, "%Y-%m-%dT%H:%M:%SZ")
+        timestamp = trkpt.find("time").text
 
-        latitudes.append(lat)
-        longitudes.append(lon)
-        timestamps.append(time_obj)
+        if prev_point:
+            distance = geodesic((prev_point['lat'], prev_point['lon']), (lat, lon)).km
+            if distance <= threshold_km:
+                valid_trkpts.append(trkpt)
+        else:
+            valid_trkpts.append(trkpt)
 
-        if prev_point is not None:
-            dist = geopy.distance.distance((lat, lon), prev_point).meters
-            time_diff = (time_obj - prev_time).total_seconds()
-            if time_diff > 0:
-                speed = dist / time_diff * 3.6  # km/h
-                speeds.append(speed)
-
-        prev_point = (lat, lon)
-        prev_time = time_obj
-
-    # Remove outliers based on speed threshold
-    speeds = [speed for speed in speeds if speed <= speed_threshold]
-
-    # Interpolation if necessary
-    if interpolate:
-        time_seconds = np.array([(time_obj - timestamps[0]).total_seconds() for time_obj in timestamps])
-        interp_lat = interp1d(time_seconds, latitudes, kind='linear', fill_value="extrapolate")
-        interp_lon = interp1d(time_seconds, longitudes, kind='linear', fill_value="extrapolate")
-        interpolated_lats = interp_lat(time_seconds)
-        interpolated_lons = interp_lon(time_seconds)
-
-        # Modify original GPX data with interpolated values
-        for i, trkpt in enumerate(root.findall(".//trkpt")):
-            trkpt.attrib['lat'] = str(interpolated_lats[i])
-            trkpt.attrib['lon'] = str(interpolated_lons[i])
-            trkpt.find(".//time").text = timestamps[i].strftime("%Y-%m-%dT%H:%M:%SZ")
-
-        # Save interpolated GPX file
-        tree.write("interpolated_trajectory.gpx")
-        print("Interpolation completed and saved to interpolated_trajectory.gpx")
+        prev_point = {'lat': lat, 'lon': lon, 'timestamp': timestamp}
     
-    return "interpolated_trajectory.gpx"
+    # Remove all trkpt elements and re-add valid ones
+    trkseg = root.find(".//trkseg")
+    for trkpt in trkseg.findall("trkpt"):
+        trkseg.remove(trkpt)
+
+    for trkpt in valid_trkpts:
+        trkseg.append(trkpt)
+
+    # Save the cleaned gpx file
+    tree.write("cleaned_" + gpx_file)
+    print(f"Outliers removed and saved as cleaned_{gpx_file}")
+
+
+def interpolate_gpx(gpx_file):
+    """
+    Interpolate missing points in the GPX file to fill gaps between valid points.
+    """
+    tree = ET.parse(gpx_file)
+    root = tree.getroot()
+    trkseg = root.find(".//trkseg")
+
+    points = []
+    for trkpt in trkseg.findall("trkpt"):
+        lat = float(trkpt.attrib['lat'])
+        lon = float(trkpt.attrib['lon'])
+        timestamp = trkpt.find("time").text
+        points.append((lat, lon, timestamp))
+
+    # Interpolate between points if there are gaps
+    interpolated_points = []
+    for i in range(1, len(points)):
+        point1 = points[i-1]
+        point2 = points[i]
+
+        interpolated_points.append(point1)
+
+        # Linear interpolation between lat, lon and timestamp
+        lat1, lon1, time1 = point1
+        lat2, lon2, time2 = point2
+
+        # You can add logic for interpolating time here if necessary
+
+        interpolated_points.append((lat2, lon2, time2))
+
+    # Rebuild the GPX file with interpolated points
+    trkseg.clear()
+    for lat, lon, timestamp in interpolated_points:
+        trkpt = ET.SubElement(trkseg, "trkpt", lat=str(lat), lon=str(lon))
+        time = ET.SubElement(trkpt, "time")
+        time.text = timestamp
+
+    # Save the interpolated GPX file
+    tree.write("interpolated_" + gpx_file)
+    print(f"Interpolation completed. Saved as interpolated_{gpx_file}")
+
+
+def process_gpx_file(input_gpx_file):
+    """
+    Complete preprocessing workflow: outlier removal and interpolation.
+    """
+    # Step 1: Remove outliers
+    remove_outliers(input_gpx_file)
+
+    # Step 2: Interpolate missing points
+    interpolate_gpx("cleaned_" + input_gpx_file)
+
+
+# Example usage
+input_gpx_file = "merged_trajectory.gpx"  # Path to the merged GPX file
+process_gpx_file(input_gpx_file)
